@@ -80,7 +80,8 @@ fn setting(flag, key, fallback) {
 bind start = do {
     bind host = cli_arg("listen", "127.0.0.1")
     bind port = to_number(cli_arg("port", "7860"))
-    bind original = "E:/MoonAI-Backup/Programs/SannyChat/imagination/models"
+    # the WebUI-style models folder (Stable-diffusion/, Lora/, VAE/); --models/--loras/--vaes or Settings point elsewhere
+    bind original = "models"
 
     bind cfg = "{" +
         "\"models_dir\":" + jstr(setting("models", "models_dir", original + "/Stable-diffusion")) + "," +

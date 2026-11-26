@@ -19,8 +19,9 @@ Other flags: `--port`, `--models <dir>`, `--loras <dir>`, `--vaes <dir>`, `--out
 `--precision fp16|bf16|fp32`, `--ckpt <name>`. Settings saved from the Settings tab go to
 `settings.json`. Flags take priority over it.
 
-By default the app reads the checkpoints, LoRAs and VAEs of the original WebUI install in place
-(`E:/MoonAI-Backup/Programs/SannyChat/imagination/models/...`), so nothing is copied.
+By default the app reads checkpoints, LoRAs and VAEs from `models/Stable-diffusion`, `models/Lora`
+and `models/VAE`. Point `--models` / `--loras` / `--vaes` (or Settings) at an existing WebUI install's
+folders to use them in place, so nothing is copied.
 
 ## What it does
 
