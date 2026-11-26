@@ -1,0 +1,202 @@
+// controllers/api.ling — the page's own JSON API. Every handler is quick: generation is queued
+// with sd_submit and polled, so the single-threaded server keeps answering while images render.
+
+// GET /api/models → checkpoints, LoRAs, VAEs, samplers, schedulers and what the engine has loaded
+fn api_models(request) {
+    return respond_json("{\"models\":" + models_json() +
+        ",\"loras\":" + loras_json() +
+        ",\"vaes\":" + vaes_json() +
+        ",\"upscalers\":" + sd_upscalers() +
+        ",\"current\":" + jstr(conf("checkpoint")) +
+        ",\"vae\":" + jstr(conf("vae")) +
+        ",\"samplers\":" + sd_samplers() +
+        ",\"schedulers\":" + sd_schedulers() +
+        ",\"engine\":" + sd_loaded() + "}")
+}
+
+// POST /api/models/select   {"checkpoint": "...", "vae": "..."}  → starts loading it at once
+fn api_select_model(request) {
+    bind want = sd_json_get(request.body, "checkpoint")
+    bind path = find_checkpoint(want)
+    if path == "" {
+        return respond_error(404, "checkpoint not found: " + want)
+    }
+    bind vae = sd_json_get(request.body, "vae")
+    if vae == "Automatic" || vae == "None" {
+        bind vae = ""
+    }
+    sd_config("{\"checkpoint\":" + jstr(path) + ",\"vae\":" + jstr(vae) + "}")
+    bind job = sd_submit("{\"load_only\":true,\"checkpoint\":" + jstr(path) + ",\"vae\":" + jstr(vae) + "}")
+    return respond_json("{\"job\":" + jstr(job) + ",\"checkpoint\":" + jstr(path) + "}")
+}
+
+// POST /api/generate?mode=txt2img|img2img   body: the generation parameters (WebUI field names)
+fn api_generate(request) {
+    bind mode = query_param(request.query, "mode", "txt2img")
+    if mode != "img2img" && mode != "edit" && mode != "extras" && mode != "video" {
+        bind mode = "txt2img"
+    }
+    bind body = request.body
+    if mode == "video" && sd_json_get(body, "init_images.0") == "" {
+        // one frame of the Video tab: an img2img job on that frame
+        return respond_error(400, "a video frame job needs its frame in init_images")
+    }
+    if mode == "edit" {
+        // instruction editing runs Qwen-Image-Edit in the same engine; it needs a picture
+        if sd_json_get(body, "init_images.0") == "" {
+            return respond_error(400, "Edit needs a picture: drop one into the Edit tab")
+        }
+        bind body = json_with(body, "task", jstr("edit"))
+    }
+    if mode == "extras" {
+        // ESRGAN / Lanczos upscale of one picture (the WebUI's Extras tab)
+        if sd_json_get(body, "init_images.0") == "" && sd_json_get(body, "image") == "" {
+            return respond_error(400, "Upscale needs a picture")
+        }
+        bind body = json_with(body, "task", jstr("upscale"))
+    }
+    if sd_json_get(body, "prompt") == "" && sd_json_get(body, "init_images") == "" && sd_json_get(body, "negative_prompt") == "" {
+        // an empty prompt is allowed (the WebUI allows it), but the body must at least be JSON
+        if !str_starts_with(str_trim(body), "{") {
+            return respond_error(400, "the request body must be a JSON object")
+        }
+    }
+    if mode != "edit" && mode != "extras" && sd_json_get(body, "checkpoint") == "" {
+        bind body = json_with(body, "checkpoint", jstr(conf("checkpoint")))
+    }
+    if mode != "edit" && mode != "extras" && sd_json_get(body, "vae") == "" {
+        bind body = json_with(body, "vae", jstr(conf("vae")))
+    }
+    // the browser sends its local date so the folder matches the user's day (the server only knows UTC)
+    bind day = query_param(request.query, "date", "")
+    bind outdir = output_dir(mode)
+    if is_date(day) {
+        bind outdir = conf("outputs_root") + "/" + mode + "-images/" + day
+    }
+    if mode == "video" {
+        // outputs/video-images/<date>/<run>/keys: what the model drew for each keyframe
+        bind vdir = video_run_dir(request)
+        if vdir == "" {
+            return respond_error(400, "a video frame job needs ?run=<name>")
+        }
+        bind outdir = vdir + "/keys"
+    }
+    bind body = json_with(body, "outdir", jstr(outdir))
+    bind job = sd_submit(body)
+    if str_starts_with(job, "ERROR:") {
+        return respond_error(400, substr(job, 7, str_len(job) - 7))
+    }
+    return respond_json("{\"job\":" + jstr(job) + ",\"outputs_root\":" + jstr(conf("outputs_root")) + "}")
+}
+
+// GET /api/status?job=<id>
+fn api_status(request) {
+    return respond_json(sd_status(query_param(request.query, "job", "")))
+}
+
+// GET /api/preview?job=<id> → {"image": "<base64 png>"} (the live, low-resolution preview)
+fn api_preview(request) {
+    return respond_json("{\"image\":" + jstr(sd_preview(query_param(request.query, "job", ""))) + "}")
+}
+
+fn api_interrupt(request) {
+    sd_interrupt(query_param(request.query, "job", ""))
+    return respond_json("{\"ok\":true}")
+}
+
+fn api_skip(request) {
+    sd_skip(query_param(request.query, "job", ""))
+    return respond_json("{\"ok\":true}")
+}
+
+fn api_unload(request) {
+    sd_unload()
+    return respond_json("{\"ok\":true}")
+}
+
+fn api_engine(request) {
+    return respond_json(sd_loaded())
+}
+
+// POST /api/tokens   body: the prompt text → {"tokens": 26, "max": 75}
+fn api_tokens(request) {
+    return respond_json(sd_tokens(request.body))
+}
+
+// POST /api/png-info   body: a data: URL (or base64) of a PNG → {"info": "<parameters text>"}
+fn api_png_info(request) {
+    return respond_json("{\"info\":" + jstr(sd_png_info(request.body)) + "}")
+}
+
+// GET /api/gallery?mode=txt2img&page=0 → newest first, 60 a page
+fn api_gallery(request) {
+    bind mode = query_param(request.query, "mode", "txt2img")
+    if mode != "img2img" && mode != "edit" {
+        bind mode = "txt2img"
+    }
+    bind page = to_number(query_param(request.query, "page", "0"))
+    bind per = 60
+    bind root = conf("outputs_root")
+    bind base = root + "/" + mode + "-images"
+    bind files = list_new()
+    if is_dir(base) {
+        bind days = list_dir(base)
+        bind d = len(days) - 1
+        while d >= 0 {
+            bind day = list_get(days, d)
+            if is_dir(day) {
+                bind imgs = list_dir(day)
+                bind k = len(imgs) - 1
+                while k >= 0 {
+                    bind f = list_get(imgs, k)
+                    if path_ext(f) == "png" {
+                        bind files = list_push(files, f)
+                    }
+                    bind k = k - 1
+                }
+            }
+            bind d = d - 1
+        }
+    }
+    bind total = len(files)
+    bind out = "["
+    bind i = page * per
+    bind n = 0
+    while i < total && n < per {
+        bind f = list_get(files, i)
+        if n > 0 {
+            bind out = out + ","
+        }
+        bind out = out + "{\"url\":" + jstr("/outputs/" + rel_name(f, root)) + ",\"name\":" + jstr(path_name(f)) + ",\"path\":" + jstr(f) + "}"
+        bind i = i + 1
+        bind n = n + 1
+    }
+    return respond_json("{\"images\":" + out + "],\"total\":" + num_str(total) + ",\"page\":" + num_str(page) + ",\"per\":" + num_str(per) + "}")
+}
+
+// GET /api/settings → the engine configuration
+fn api_get_settings(request) {
+    return respond_json(sd_config("{}"))
+}
+
+// POST /api/settings   {"models_dir", "lora_dir", "vae_dir", "outputs_root", "device", "precision", "sliced_attention"}
+// Applied at once (a device or precision change reloads the model on the next run) and kept in
+// settings.json for the next start.
+fn api_save_settings(request) {
+    bind body = request.body
+    if !str_starts_with(str_trim(body), "{") {
+        return respond_error(400, "settings must be a JSON object")
+    }
+    write_file("settings.json", body)
+    bind merged = sd_config(body)
+    bind outs = conf("outputs_root")
+    make_dir(outs + "/txt2img-images")
+    make_dir(outs + "/img2img-images")
+    make_dir(outs + "/edit-images")
+    make_dir(outs + "/video-images")
+    return respond_json(merged)
+}
+
+fn page_health(request) {
+    return respond(200, "ok", "text/plain")
+}

@@ -1,0 +1,169 @@
+// app.ling — LingDiffusion: a Stable Diffusion web UI and API, written in Ling.
+//
+// This is AUTOMATIC1111's stable-diffusion-webui rebuilt as a Ling program: the same txt2img /
+// img2img / hires fix / LoRA / PNG Info workflow and the same /sdapi/v1 JSON API, but the
+// diffusion runs inside this ling.exe (the sd_* builtins, crates/ling-diffusion on candle + CUDA).
+// Nothing is shelled out to and there is no Python. The look follows LingStationX.
+//
+// How the pieces fit:
+//   app.ling                 startup, configuration, routes
+//   controllers/models.ling  finding checkpoints / LoRAs / VAEs, small JSON helpers
+//   controllers/ui.ling      the page (server-rendered shell; static/app.js drives it)
+//   controllers/api.ling     the UI's own JSON API (/api/*): queue, poll, gallery, PNG info
+//   controllers/sdapi.ling   the AUTOMATIC1111-compatible API (/sdapi/v1/*)
+//   controllers/video.ling   the Video tab's run folders (/api/video/*); static/video.js does the rest
+//
+// Generation never blocks the server: sd_submit queues a job on the engine's worker thread and
+// returns at once; the page polls /api/status. (Only the WebUI-compatible /sdapi/v1/txt2img and
+// img2img wait for their result, because that API is synchronous by definition.)
+//
+// Run:  run.bat   or   bin\ling-diffusion.exe run --interp app.ling --port 7860
+// Flags (all optional):
+//   --listen 127.0.0.1    interface to bind (0.0.0.0 to share on the LAN)
+//   --port 7860
+//   --models <dir>        Stable Diffusion checkpoints (.safetensors / .ckpt)
+//   --loras <dir>         LoRA files, used as <lora:name:weight> in the prompt
+//   --vaes <dir>          stand-alone VAE files
+//   --outputs <dir>       where images are saved (txt2img-images/<date>, img2img-images/<date>)
+//   --device auto         GPU to render on: auto (the one with the most free memory, i.e. not
+//                         the display GPU), cuda:0, cuda:1, or cpu
+//   --precision fp16      fp16 | bf16 | fp32 for the UNet and text encoders
+//   --ckpt <name>         checkpoint selected at start
+//   --edit-device cuda:1  GPU for the Qwen-Image-Edit transformer (Edit tab)
+//   --edit-encoder-device cuda:0   GPU for its Qwen2.5-VL text/vision encoder
+//   --idle-unload 15      minutes without a job before the models leave the GPUs (0 = never)
+//   --edit-model <dir>    the Qwen-Image-Edit-2511 folder (python tools/download_edit_model.py fills it)
+//   --upscalers <dir>     extra folder of ESRGAN / Real-ESRGAN upscalers (models/ESRGAN and the
+//                         original install's ESRGAN + RealESRGAN folders are always searched)
+
+use "controllers/models"
+use "controllers/ui"
+use "controllers/api"
+use "controllers/sdapi"
+use "controllers/video"
+
+form Response { status, body, content_type, set_cookie, location }
+
+fn respond(status, body, content_type) {
+    return Response(status, body, content_type, "", "")
+}
+
+fn respond_json(body) {
+    return Response(200, body, "application/json; charset=utf-8", "", "")
+}
+
+fn respond_error(status, message) {
+    return Response(status, "{\"error\":" + jstr(message) + ",\"detail\":" + jstr(message) + "}", "application/json; charset=utf-8", "", "")
+}
+
+// The engine keeps the configuration (sd_config merges a JSON patch and returns the whole of it);
+// http_route handlers don't close over variables, so this is where every handler reads it from.
+fn conf(key) {
+    return sd_json_get(sd_config("{}"), key)
+}
+
+// settings.json holds what the Settings tab saved; command-line flags win over it.
+fn setting(flag, key, fallback) {
+    bind v = cli_arg(flag, "")
+    if v != "" {
+        return v
+    }
+    if file_exists("settings.json") {
+        bind s = sd_json_get(read_file("settings.json"), key)
+        if s != "" {
+            return s
+        }
+    }
+    return fallback
+}
+
+bind start = do {
+    bind host = cli_arg("listen", "127.0.0.1")
+    bind port = to_number(cli_arg("port", "7860"))
+    bind original = "E:/MoonAI-Backup/Programs/SannyChat/imagination/models"
+
+    bind cfg = "{" +
+        "\"models_dir\":" + jstr(setting("models", "models_dir", original + "/Stable-diffusion")) + "," +
+        "\"lora_dir\":" + jstr(setting("loras", "lora_dir", original + "/Lora")) + "," +
+        "\"vae_dir\":" + jstr(setting("vaes", "vae_dir", original + "/VAE")) + "," +
+        "\"clip_dir\":" + jstr("models/clip") + "," +
+        "\"outputs_root\":" + jstr(setting("outputs", "outputs_root", "outputs")) + "," +
+        "\"outdir\":" + jstr(setting("outputs", "outputs_root", "outputs") + "/txt2img-images") + "," +
+        "\"device\":" + jstr(setting("device", "device", "auto")) + "," +
+        "\"precision\":" + jstr(setting("precision", "precision", "fp16")) + "," +
+        "\"checkpoint\":" + jstr(setting("ckpt", "checkpoint", "")) + "," +
+        "\"sliced_attention\":" + setting("sliced", "sliced_attention", "false") + "," +
+        "\"edit_dir\":" + jstr(setting("edit-model", "edit_dir", "models/qwen-image-edit-2511")) + "," +
+        "\"edit_device\":" + jstr(setting("edit-device", "edit_device", "cuda:1")) + "," +
+        "\"edit_encoder_device\":" + jstr(setting("edit-encoder-device", "edit_encoder_device", "cuda:0")) + "," +
+        "\"upscaler_dirs\":[" + jstr(setting("upscalers", "upscaler_dir", "models/ESRGAN")) + "," + jstr("models/ESRGAN") + "," +
+            jstr(original + "/ESRGAN") + "," + jstr(original + "/RealESRGAN") + "]," +
+        "\"idle_unload_minutes\":" + num_str(to_number(setting("idle-unload", "idle_unload_minutes", "15"))) + "}"
+    sd_config(cfg)
+
+    // no checkpoint chosen yet: take the first usable one
+    if conf("checkpoint") == "" {
+        bind ms = model_files("checkpoint")
+        if len(ms) > 0 {
+            sd_config("{\"checkpoint\":" + jstr(list_get(ms, 0)) + "}")
+        }
+    }
+    make_dir(conf("outputs_root") + "/txt2img-images")
+    make_dir(conf("outputs_root") + "/img2img-images")
+    make_dir(conf("outputs_root") + "/edit-images")
+    make_dir(conf("outputs_root") + "/extras-images")
+    make_dir(conf("outputs_root") + "/video-images")
+
+    http_static("/static", "static")
+    http_static("/outputs", conf("outputs_root"))
+
+    // the page
+    http_route("GET", "/", page_home)
+    http_route("GET", "/health", page_health)
+
+    // the UI's API
+    http_route("GET", "/api/models", api_models)
+    http_route("POST", "/api/models/select", api_select_model)
+    http_route("POST", "/api/generate", api_generate)
+    http_route("GET", "/api/status", api_status)
+    http_route("GET", "/api/preview", api_preview)
+    http_route("POST", "/api/interrupt", api_interrupt)
+    http_route("POST", "/api/skip", api_skip)
+    http_route("POST", "/api/unload", api_unload)
+    http_route("GET", "/api/engine", api_engine)
+    http_route("POST", "/api/tokens", api_tokens)
+    http_route("POST", "/api/png-info", api_png_info)
+    http_route("GET", "/api/gallery", api_gallery)
+    http_route("GET", "/api/settings", api_get_settings)
+    http_route("POST", "/api/settings", api_save_settings)
+    http_route("POST", "/api/video/frame", api_video_frame)
+    http_route("POST", "/api/video/meta", api_video_meta)
+
+    // AUTOMATIC1111-compatible API (LingAnime, ling-paint, scripts written for the WebUI)
+    http_route("GET", "/sdapi/v1/sd-models", sdapi_models)
+    http_route("POST", "/sdapi/v1/refresh-checkpoints", sdapi_refresh)
+    http_route("GET", "/sdapi/v1/samplers", sdapi_samplers)
+    http_route("GET", "/sdapi/v1/schedulers", sdapi_schedulers)
+    http_route("GET", "/sdapi/v1/loras", sdapi_loras)
+    http_route("GET", "/sdapi/v1/sd-vae", sdapi_vaes)
+    http_route("GET", "/sdapi/v1/upscalers", sdapi_upscalers)
+    http_route("POST", "/sdapi/v1/extra-single-image", sdapi_extra_single)
+    http_route("GET", "/sdapi/v1/options", sdapi_get_options)
+    http_route("POST", "/sdapi/v1/options", sdapi_set_options)
+    http_route("GET", "/sdapi/v1/progress", sdapi_progress)
+    http_route("POST", "/sdapi/v1/interrupt", sdapi_interrupt)
+    http_route("POST", "/sdapi/v1/skip", sdapi_skip)
+    http_route("POST", "/sdapi/v1/txt2img", sdapi_txt2img)
+    http_route("POST", "/sdapi/v1/img2img", sdapi_img2img)
+    http_route("POST", "/sdapi/v1/png-info", sdapi_png_info)
+    http_route("POST", "/sdapi/v1/unload-checkpoint", sdapi_unload)
+
+    print("LingDiffusion")
+    print("  checkpoints  " + conf("models_dir"))
+    print("  loras        " + conf("lora_dir"))
+    print("  outputs      " + conf("outputs_root"))
+    print("  device       " + conf("device") + " (" + conf("precision") + ")")
+    print("  checkpoint   " + conf("checkpoint"))
+    print("listening on http://" + host + ":" + num_str(port))
+    http_serve(host, port)
+}

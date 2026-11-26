@@ -1,0 +1,107 @@
+# CI for LingDiffusion (generated for the LingLin-Art-LLC public release).
+#
+#   push / pull request : build the app for Linux and Windows with the Ling toolchain (the check)
+#   tag v*              : the same builds, attached to a GitHub Release, then `lingfu publish`
+#                         to fu.ling-lang.org (needs the LINGFU_TOKEN secret; skipped without it)
+#
+# The Ling compiler is not vendored: setup-ling checks out LingLin-Art-LLC/ling (+ the crates its
+# workspace points at) next to this repo, the same side-by-side layout as a developer machine,
+# and builds `ling` with stable Rust. `ling build` does not cross-compile, so each platform
+# builds on its own runner.
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      ling_ref: { description: "branch / tag of LingLin-Art-LLC/ling to build with", default: "master" }
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  CARGO_TERM_COLOR: always
+  APP_DIR: LingDiffusion
+  PROJECT: LingDiffusion
+  # the app's runtime needs the ling crate's `web` feature (HTTP, db_*, ...)
+  LING_APP_FEATURES: web
+
+jobs:
+  build:
+    name: Build ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.optional == true }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  platform: lin, label: linux-x86_64,   dist: linux }
+          - { os: windows-latest, platform: win, label: windows-x86_64, dist: windows }
+          - { os: macos-latest,   platform: mac, label: macos,          dist: macos, optional: true }
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: LingDiffusion }
+      - uses: LingLin-Art-LLC/ling/.github/actions/setup-ling@master
+        with: { ling-ref: "${{ inputs.ling_ref || 'master' }}" }
+      - name: ling build (${{ matrix.platform }})
+        shell: bash
+        working-directory: ${{ env.PROJECT }}
+        run: |
+          "$LING" build . --platform ${{ matrix.platform }} --out dist
+          ls -la dist/${{ matrix.dist }}
+      - name: Package
+        shell: bash
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then v="${GITHUB_REF_NAME#v}"; else v="${GITHUB_SHA::8}"; fi
+          name="LingDiffusion-$v-${{ matrix.label }}"
+          mkdir -p out
+          src="$PROJECT/dist/${{ matrix.dist }}"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a -tzip "out/$name.zip" "./$src/*" >/dev/null
+          else
+            tar -C "$src" -czf "out/$name.tar.gz" .
+          fi
+          ls -la out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LingDiffusion-${{ matrix.label }}
+          path: out/*
+          if-no-files-found: error
+
+  release:
+    name: GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts, merge-multiple: true }
+      - run: ls -la artifacts
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+
+  lingfu:
+    name: Publish to lingfu
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [release]
+    runs-on: ubuntu-latest
+    steps:
+      # a fresh checkout: lingfu packs the project folder, which must not hold build output
+      - uses: actions/checkout@v4
+        with: { path: LingDiffusion }
+      - uses: LingLin-Art-LLC/ling/.github/actions/setup-ling@master
+        with: { lingfu: "true" }
+      - uses: LingLin-Art-LLC/ling/.github/actions/lingfu-publish@master
+        with:
+          project-dir: LingDiffusion
+          version: ${{ github.ref_name }}
+          token: ${{ secrets.LINGFU_TOKEN }}

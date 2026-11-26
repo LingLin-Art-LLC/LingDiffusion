@@ -1,0 +1,26 @@
+# LingDiffusion: a Stable Diffusion web UI + API written in Ling, in the LingStationX look.
+# The diffusion itself runs in-process (crates/ling-diffusion: candle, CUDA) — no Python, no
+# external model server. Run it with run.bat (or: bin\ling-diffusion.exe run --interp app.ling).
+
+[spirit]
+name = "ling-diffusion"
+kind = "web"
+version = "2030.0.1"
+entry = "main.ling"
+description = "LingDiffusion: txt2img / img2img / hires fix / LoRA / PNG Info / instruction editing (Qwen-Image-Edit-2511) for SD 1.5 and SDXL single-file checkpoints, an AUTOMATIC1111-compatible /sdapi/v1 API, styled after LingStationX."
+keywords = ["stable-diffusion", "image", "ai", "web", "ling"]
+homepage = "https://ling-lang.org"
+license = "LicenseRef-Ling-Harmony-1.0"
+
+[author]
+ling-lin = { email = "taellinglin@gmail.com" }
+
+[realm]
+language = "en"
+level    = "铁"
+source   = "."
+
+[root]
+core = { version = "2030.1", language = "en" }
+
+[depends]

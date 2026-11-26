@@ -1,0 +1,274 @@
+// controllers/models.ling — the model folders, and the small JSON helpers the rest of the app
+// builds its replies with (Ling builds JSON as text; the engine's sd_json_get reads it back).
+
+// "text" -> "\"text\"" with the escapes JSON needs
+fn jstr(s) {
+    return "\"" + json_escape(s) + "\""
+}
+
+fn jbool(b) {
+    if b {
+        return "true"
+    }
+    return "false"
+}
+
+// ["a","b"] from a list of strings
+fn jlist(items) {
+    bind out = "["
+    bind i = 0
+    while i < len(items) {
+        if i > 0 {
+            bind out = out + ","
+        }
+        bind out = out + jstr(list_get(items, i))
+        bind i = i + 1
+    }
+    return out + "]"
+}
+
+// Adds "key": <raw json value> to a JSON object given as text: {"a":1} -> {"key":v,"a":1}.
+// The JSON the browser and API clients send stays as text end to end; this is the one edit Ling
+// makes to it (the output folder, a resolved checkpoint).
+fn json_with(obj, key, raw_value) {
+    bind t = str_trim(obj)
+    if t == "" || !str_starts_with(t, "{") {
+        bind t = "{}"
+    }
+    bind rest = str_trim(substr(t, 1, str_len(t) - 1))
+    bind field = jstr(key) + ":" + raw_value
+    if rest == "}" {
+        return "{" + field + "}"
+    }
+    return "{" + field + "," + rest
+}
+
+fn has_weight_ext(path) {
+    bind e = path_ext(path)
+    return e == "safetensors" || e == "ckpt" || e == "pt" || e == "pth"
+}
+
+// every weights file under dir (sub-folders included, like the WebUI), sorted by path
+fn weight_files(dir) {
+    bind out = list_new()
+    if dir == "" || !is_dir(dir) {
+        return out
+    }
+    bind stack = list_new()
+    bind stack = list_push(stack, dir)
+    bind guard = 0
+    while len(stack) > 0 && guard < 200 {
+        bind d = list_get(stack, len(stack) - 1)
+        bind stack = list_pop_last(stack)
+        bind entries = list_dir(d)
+        bind i = 0
+        while i < len(entries) {
+            bind p = list_get(entries, i)
+            if is_dir(p) {
+                bind stack = list_push(stack, p)
+            } else if has_weight_ext(p) {
+                bind out = list_push(out, p)
+            }
+            bind i = i + 1
+        }
+        bind guard = guard + 1
+    }
+    return out
+}
+
+fn list_pop_last(l) {
+    bind out = list_new()
+    bind i = 0
+    while i < len(l) - 1 {
+        bind out = list_push(out, list_get(l, i))
+        bind i = i + 1
+    }
+    return out
+}
+
+// "C:/m/sub/x.safetensors" under "C:/m" -> "sub/x.safetensors"
+fn rel_name(path, dir) {
+    bind d = str_replace(dir, "\\", "/")
+    bind p = str_replace(path, "\\", "/")
+    if str_starts_with(p, d + "/") {
+        return substr(p, str_len(d) + 1, str_len(p) - str_len(d) - 1)
+    }
+    return path_name(p)
+}
+
+fn stem(name) {
+    bind e = path_ext(name)
+    if e == "" {
+        return name
+    }
+    return substr(name, 0, str_len(name) - str_len(e) - 1)
+}
+
+// kind: "checkpoint" (SD 1.5 / SDXL only), "lora", "vae"
+fn model_files(kind) {
+    bind dir = conf("models_dir")
+    if kind == "lora" {
+        bind dir = conf("lora_dir")
+    }
+    if kind == "vae" {
+        bind dir = conf("vae_dir")
+    }
+    bind files = weight_files(dir)
+    if kind != "checkpoint" {
+        return files
+    }
+    bind out = list_new()
+    bind i = 0
+    while i < len(files) {
+        bind f = list_get(files, i)
+        bind k = sd_json_get(sd_inspect(f), "kind")
+        if k == "sd15" || k == "sdxl" {
+            bind out = list_push(out, f)
+        }
+        bind i = i + 1
+    }
+    return out
+}
+
+// the WebUI's checkpoint title: "sub/name.safetensors"
+fn model_title(path) {
+    return rel_name(path, conf("models_dir"))
+}
+
+// [{"title", "model_name", "filename", "kind", "label", "size_mb", "selected"}]
+fn models_json() {
+    bind files = model_files("checkpoint")
+    bind current = conf("checkpoint")
+    bind out = "["
+    bind i = 0
+    while i < len(files) {
+        bind f = list_get(files, i)
+        bind info = sd_inspect(f)
+        if i > 0 {
+            bind out = out + ","
+        }
+        bind out = out + "{\"title\":" + jstr(model_title(f)) +
+            ",\"model_name\":" + jstr(stem(path_name(f))) +
+            ",\"filename\":" + jstr(f) +
+            ",\"hash\":null,\"sha256\":null,\"config\":null" +
+            ",\"kind\":" + jstr(sd_json_get(info, "kind")) +
+            ",\"label\":" + jstr(sd_json_get(info, "label")) +
+            ",\"size_mb\":" + sd_json_get(info, "size_mb") +
+            ",\"selected\":" + jbool(f == current) + "}"
+        bind i = i + 1
+    }
+    return out + "]"
+}
+
+// LoRAs as the WebUI lists them: [{"name", "alias", "path", "kind"}]
+fn loras_json() {
+    bind files = model_files("lora")
+    bind out = "["
+    bind i = 0
+    while i < len(files) {
+        bind f = list_get(files, i)
+        if i > 0 {
+            bind out = out + ","
+        }
+        bind n = stem(path_name(f))
+        bind out = out + "{\"name\":" + jstr(n) + ",\"alias\":" + jstr(n) + ",\"path\":" + jstr(f) +
+            ",\"kind\":" + jstr(sd_json_get(sd_inspect(f), "label")) + "}"
+        bind i = i + 1
+    }
+    return out + "]"
+}
+
+fn vaes_json() {
+    bind files = model_files("vae")
+    bind out = "["
+    bind i = 0
+    while i < len(files) {
+        bind f = list_get(files, i)
+        if i > 0 {
+            bind out = out + ","
+        }
+        bind out = out + "{\"model_name\":" + jstr(path_name(f)) + ",\"filename\":" + jstr(f) + "}"
+        bind i = i + 1
+    }
+    return out + "]"
+}
+
+// "animeTWO", "animeTWO.safetensors [hash]", "sub/x.safetensors" or a full path -> the file, or ""
+fn find_checkpoint(name) {
+    bind n = str_trim(name)
+    if n == "" {
+        return ""
+    }
+    bind at = str_find(n, " [")
+    if at > 0 {
+        bind n = substr(n, 0, at)
+    }
+    if file_exists(n) {
+        return n
+    }
+    bind files = model_files("checkpoint")
+    bind want = str_lower(stem(path_name(n)))
+    bind i = 0
+    while i < len(files) {
+        bind f = list_get(files, i)
+        if str_lower(model_title(f)) == str_lower(n) || str_lower(stem(path_name(f))) == want {
+            return f
+        }
+        bind i = i + 1
+    }
+    return ""
+}
+
+// ── dates for the output folders (the WebUI files images under outputs/<mode>/YYYY-MM-DD) ──
+
+fn pad2(n) {
+    if n < 10 {
+        return "0" + num_str(n)
+    }
+    return num_str(n)
+}
+
+// days since 1970-01-01 -> "YYYY-MM-DD" (Howard Hinnant's civil_from_days)
+fn date_from_days(days) {
+    bind z = days + 719468
+    bind era = floor(z / 146097)
+    bind doe = z - era * 146097
+    bind yoe = floor((doe - floor(doe / 1460) + floor(doe / 36524) - floor(doe / 146096)) / 365)
+    bind y = yoe + era * 400
+    bind doy = doe - (365 * yoe + floor(yoe / 4) - floor(yoe / 100))
+    bind mp = floor((5 * doy + 2) / 153)
+    bind d = doy - floor((153 * mp + 2) / 5) + 1
+    bind m = mp + 3
+    if mp >= 10 {
+        bind m = mp - 9
+    }
+    if m <= 2 {
+        bind y = y + 1
+    }
+    return num_str(y) + "-" + pad2(m) + "-" + pad2(d)
+}
+
+fn today() {
+    return date_from_days(floor(now_unix() / 86400))
+}
+
+// "YYYY-MM-DD" and nothing else (it becomes part of a folder path)
+fn is_date(s) {
+    if str_len(s) != 10 || substr(s, 4, 1) != "-" || substr(s, 7, 1) != "-" {
+        return false
+    }
+    bind i = 0
+    while i < 10 {
+        bind c = substr(s, i, 1)
+        if i != 4 && i != 7 && str_find("0123456789", c) < 0 {
+            return false
+        }
+        bind i = i + 1
+    }
+    return true
+}
+
+// outputs/<mode>-images/<date>
+fn output_dir(mode) {
+    return conf("outputs_root") + "/" + mode + "-images/" + today()
+}

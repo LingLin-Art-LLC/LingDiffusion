@@ -1,0 +1,165 @@
+// controllers/sdapi.ling — the AUTOMATIC1111 WebUI API (/sdapi/v1/*), so tools written for the
+// WebUI (LingAnime's SD bridge in ling-paint, sdai_generate_start, scripts, other front ends) can
+// point at LingDiffusion unchanged. Request and reply bodies are the WebUI's; the JSON itself is
+// handled by the engine (sd_submit reads the WebUI fields, sd_result writes the WebUI reply).
+//
+// txt2img / img2img are synchronous in that API: the handler waits for its images. While it
+// waits this server answers nobody else, which is what the WebUI's own API does too; the page
+// uses the queued /api/generate instead.
+
+fn sdapi_models(request) {
+    return respond_json(models_json())
+}
+
+fn sdapi_refresh(request) {
+    return respond_json("null")
+}
+
+fn sdapi_samplers(request) {
+    return respond_json(sd_samplers())
+}
+
+fn sdapi_schedulers(request) {
+    return respond_json(sd_schedulers())
+}
+
+fn sdapi_loras(request) {
+    return respond_json(loras_json())
+}
+
+// GET /sdapi/v1/upscalers  → [{name, model_name, model_path, model_url, scale}]
+fn sdapi_upscalers(request) {
+    return respond_json(sd_upscalers())
+}
+
+// POST /sdapi/v1/extra-single-image  {image, upscaler_1, upscaling_resize | resize_mode 1 +
+// upscaling_resize_w/_h}  → {image, html_info}. Waits for the result, like the WebUI.
+fn sdapi_extra_single(request) {
+    bind body = request.body
+    if sd_json_get(body, "image") == "" {
+        return respond_error(422, "extra-single-image needs image")
+    }
+    bind body = json_with(body, "task", jstr("upscale"))
+    if sd_json_get(body, "save_images") == "" {
+        bind body = json_with(body, "save_images", "false")
+    }
+    bind body = json_with(body, "outdir", jstr(output_dir("extras")))
+    bind job = sd_submit(body)
+    if str_starts_with(job, "ERROR:") {
+        return respond_error(422, substr(job, 7, str_len(job) - 7))
+    }
+    sd_wait(job, 3600000)
+    bind st = sd_status(job)
+    if sd_json_get(st, "state") == "error" {
+        return respond_error(500, sd_json_get(st, "error"))
+    }
+    bind res = sd_result(job)
+    return respond_json("{\"image\":" + jstr(sd_json_get(res, "images.0")) + ",\"html_info\":" + jstr(sd_json_get(st, "infotexts.0")) + "}")
+}
+
+fn sdapi_vaes(request) {
+    return respond_json(vaes_json())
+}
+
+fn sdapi_get_options(request) {
+    bind vae = conf("vae")
+    if vae == "" {
+        bind vae = "Automatic"
+    } else {
+        bind vae = path_name(vae)
+    }
+    return respond_json("{\"sd_model_checkpoint\":" + jstr(model_title(conf("checkpoint"))) +
+        ",\"sd_vae\":" + jstr(vae) +
+        ",\"CLIP_stop_at_last_layers\":1" +
+        ",\"outdir_txt2img_samples\":" + jstr(conf("outputs_root") + "/txt2img-images") +
+        ",\"outdir_img2img_samples\":" + jstr(conf("outputs_root") + "/img2img-images") +
+        ",\"samples_format\":\"png\"" +
+        ",\"device\":" + jstr(conf("device")) +
+        ",\"precision\":" + jstr(conf("precision")) + "}")
+}
+
+// POST /sdapi/v1/options  {"sd_model_checkpoint": "...", "sd_vae": "..."}
+fn sdapi_set_options(request) {
+    bind want = sd_json_get(request.body, "sd_model_checkpoint")
+    if want != "" {
+        bind path = find_checkpoint(want)
+        if path == "" {
+            return respond_error(404, "checkpoint not found: " + want)
+        }
+        sd_config("{\"checkpoint\":" + jstr(path) + "}")
+        sd_submit("{\"load_only\":true,\"checkpoint\":" + jstr(path) + "}")
+    }
+    bind vae = sd_json_get(request.body, "sd_vae")
+    if vae != "" {
+        if vae == "Automatic" || vae == "None" {
+            bind vae = ""
+        }
+        sd_config("{\"vae\":" + jstr(vae) + "}")
+    }
+    return respond_json("null")
+}
+
+fn sdapi_progress(request) {
+    return respond_json(sd_progress())
+}
+
+fn sdapi_interrupt(request) {
+    sd_interrupt("")
+    return respond_json("{}")
+}
+
+fn sdapi_skip(request) {
+    sd_skip("")
+    return respond_json("{}")
+}
+
+fn sdapi_unload(request) {
+    sd_unload()
+    return respond_json("{}")
+}
+
+// queue the WebUI request, wait for it, answer with {"images": [...], "parameters", "info"}
+fn sdapi_run(request, mode) {
+    bind body = request.body
+    if !str_starts_with(str_trim(body), "{") {
+        return respond_error(422, "the request body must be a JSON object")
+    }
+    if sd_json_get(body, "checkpoint") == "" && sd_json_get(body, "override_settings.sd_model_checkpoint") == "" {
+        bind body = json_with(body, "checkpoint", jstr(conf("checkpoint")))
+    }
+    if sd_json_get(body, "vae") == "" && sd_json_get(body, "override_settings.sd_vae") == "" {
+        bind body = json_with(body, "vae", jstr(conf("vae")))
+    }
+    // the WebUI API does not save images unless asked to
+    if sd_json_get(body, "save_images") == "" {
+        bind body = json_with(body, "save_images", "false")
+    }
+    bind body = json_with(body, "outdir", jstr(output_dir(mode)))
+    bind job = sd_submit(body)
+    if str_starts_with(job, "ERROR:") {
+        return respond_error(422, substr(job, 7, str_len(job) - 7))
+    }
+    sd_wait(job, 3600000)
+    bind st = sd_status(job)
+    if sd_json_get(st, "state") == "error" {
+        return respond_error(500, sd_json_get(st, "error"))
+    }
+    return respond_json(sd_result(job))
+}
+
+fn sdapi_txt2img(request) {
+    return sdapi_run(request, "txt2img")
+}
+
+fn sdapi_img2img(request) {
+    if sd_json_get(request.body, "init_images.0") == "" {
+        return respond_error(422, "img2img needs init_images")
+    }
+    return sdapi_run(request, "img2img")
+}
+
+// POST /sdapi/v1/png-info  {"image": "data:image/png;base64,..."}
+fn sdapi_png_info(request) {
+    bind info = sd_png_info(sd_json_get(request.body, "image"))
+    return respond_json("{\"info\":" + jstr(info) + ",\"items\":{\"parameters\":" + jstr(info) + "},\"parameters\":{}}")
+}

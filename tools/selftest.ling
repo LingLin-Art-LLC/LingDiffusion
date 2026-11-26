@@ -1,0 +1,40 @@
+// tools/selftest.ling — checks the helpers in controllers/models.ling that need no engine.
+// Run from the LingDiffusion folder:  bin\ling-diffusion.exe run --interp tools/selftest.ling
+use "controllers/models"
+
+fn check(name, got, want) {
+    if got == want {
+        print("ok    " + name)
+        return 0
+    }
+    print("FAIL  " + name + ": got [" + got + "] want [" + want + "]")
+    return 1
+}
+
+bind main = do {
+    bind bad = 0
+    bind bad = bad + check("jstr", jstr("a\"b"), "\"a\\\"b\"")
+    bind bad = bad + check("json_with empty", json_with("{}", "k", "1"), "{\"k\":1}")
+    bind bad = bad + check("json_with blank", json_with("  ", "k", "1"), "{\"k\":1}")
+    bind bad = bad + check("json_with obj", json_with("{\"a\":2}", "k", "\"v\""), "{\"k\":\"v\",\"a\":2}")
+    bind bad = bad + check("json_with spaced", json_with(" { \"a\" : 2 } ", "k", "1"), "{\"k\":1,\"a\" : 2 }")
+    bind bad = bad + check("date epoch", date_from_days(0), "1970-01-01")
+    bind bad = bad + check("date leap", date_from_days(11016), "2000-02-29")
+    bind bad = bad + check("date 2026", date_from_days(20765), "2026-11-08")
+    bind bad = bad + check("stem", stem("animeTWO.safetensors"), "animeTWO")
+    bind bad = bad + check("stem none", stem("noext"), "noext")
+    bind bad = bad + check("rel_name", rel_name("C:/m/sub/x.ckpt", "C:/m"), "sub/x.ckpt")
+    bind bad = bad + check("rel_name other", rel_name("D:/y/z.ckpt", "C:/m"), "z.ckpt")
+    bind bad = bad + check("jlist", jlist(["a", "b"]), "[\"a\",\"b\"]")
+    bind bad = bad + check("pad2", pad2(7), "07")
+    bind bad = bad + check("has_weight_ext", jbool(has_weight_ext("x/y.SafeTensors")), "true")
+    bind bad = bad + check("pop_last", num_str(len(list_pop_last(["a", "b", "c"]))), "2")
+    bind bad = bad + check("is_date ok", jbool(is_date("2026-11-08")), "true")
+    bind bad = bad + check("is_date dots", jbool(is_date("../../x/..")), "false")
+    bind bad = bad + check("is_date slash", jbool(is_date("2026/11/08")), "false")
+    if bad == 0 {
+        print("all passed")
+    } else {
+        print(num_str(bad) + " failed")
+    }
+}

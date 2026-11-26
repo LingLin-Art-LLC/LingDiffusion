@@ -1,0 +1,190 @@
+// controllers/ui.ling — the page. templates/index.html is the shell; this fills in the parts that
+// depend on what is on disk and what the engine has loaded (checkpoint / VAE / sampler lists,
+// the model tree and the LoRA browser), then static/app.js takes over in the browser.
+
+fn opt(value, label, selected, extra) {
+    bind s = ""
+    if selected {
+        bind s = " selected"
+    }
+    return "<option value=\"" + html_escape(value) + "\"" + s + extra + ">" + html_escape(label) + "</option>"
+}
+
+fn ckpt_options() {
+    bind files = model_files("checkpoint")
+    bind current = conf("checkpoint")
+    if len(files) == 0 {
+        return opt("", "No checkpoints in " + conf("models_dir"), true, "")
+    }
+    bind out = ""
+    bind i = 0
+    while i < len(files) {
+        bind f = list_get(files, i)
+        bind kind = sd_json_get(sd_inspect(f), "kind")
+        bind out = out + opt(f, model_title(f), f == current, " data-kind=\"" + kind + "\"")
+        bind i = i + 1
+    }
+    return out
+}
+
+fn vae_options() {
+    bind current = conf("vae")
+    bind out = opt("", "Automatic", current == "", "")
+    bind files = model_files("vae")
+    bind i = 0
+    while i < len(files) {
+        bind f = list_get(files, i)
+        bind out = out + opt(f, path_name(f), f == current, "")
+        bind i = i + 1
+    }
+    return out
+}
+
+// <option>s from one of the engine's JSON lists ([{"name": ...}, ...]); `field` picks the label
+fn json_list_options(json, field, value_field, selected) {
+    bind out = ""
+    bind i = 0
+    bind more = true
+    while more {
+        bind v = sd_json_get(json, num_str(i) + "." + value_field)
+        if v == "" {
+            bind more = false
+        } else {
+            bind out = out + opt(v, sd_json_get(json, num_str(i) + "." + field), v == selected, "")
+            bind i = i + 1
+        }
+    }
+    return out
+}
+
+// the sidebar tree: one row per checkpoint, coloured by architecture like LingStationX's folders
+fn model_tree() {
+    bind files = model_files("checkpoint")
+    bind current = conf("checkpoint")
+    bind out = "<div class=\"tree-folder\">▾ <span>" + html_escape(path_name(conf("models_dir"))) + "</span><b>" + num_str(len(files)) + "</b></div>"
+    bind i = 0
+    while i < len(files) {
+        bind f = list_get(files, i)
+        bind info = sd_inspect(f)
+        bind kind = sd_json_get(info, "kind")
+        bind cls = "item"
+        if f == current {
+            bind cls = "item on"
+        }
+        bind out = out + "<button class=\"" + cls + "\" data-path=\"" + html_escape(f) + "\" data-kind=\"" + kind + "\" title=\"" + html_escape(f) + "\">" +
+            "<i class=\"sq k-" + kind + "\"></i><span class=\"nm\">" + html_escape(stem(model_title(f))) + "</span>" +
+            "<b class=\"badge\">" + html_escape(sd_json_get(info, "label")) + "</b></button>"
+        bind i = i + 1
+    }
+    if len(files) == 0 {
+        bind out = out + "<div class=\"empty\">No SD 1.5 / SDXL checkpoints here. Point Settings &gt; Folders at your models.</div>"
+    }
+    return out
+}
+
+fn lora_list() {
+    bind files = model_files("lora")
+    bind out = "<div class=\"tree-folder\">▾ <span>" + html_escape(path_name(conf("lora_dir"))) + "</span><b>" + num_str(len(files)) + "</b></div>"
+    bind i = 0
+    while i < len(files) {
+        bind f = list_get(files, i)
+        bind n = stem(path_name(f))
+        bind out = out + "<button class=\"item\" data-lora=\"" + html_escape(n) + "\" title=\"Add &lt;lora:" + html_escape(n) + ":1&gt; to the prompt\">" +
+            "<i class=\"sq k-lora\"></i><span class=\"nm\">" + html_escape(n) + "</span><b class=\"badge\">+</b></button>"
+        bind i = i + 1
+    }
+    if len(files) == 0 {
+        bind out = out + "<div class=\"empty\">No LoRAs in " + html_escape(conf("lora_dir")) + "</div>"
+    }
+    return out
+}
+
+fn engine_line() {
+    bind e = sd_loaded()
+    bind dev = conf("device")
+    if sd_json_get(e, "cuda") != "true" {
+        bind dev = "cpu (built without CUDA)"
+    }
+    bind ck = sd_json_get(e, "checkpoint")
+    if ck == "" {
+        return "Engine " + html_escape(dev) + " · nothing loaded yet"
+    }
+    return "Engine " + html_escape(dev) + " · " + html_escape(sd_json_get(e, "arch")) + " · " + html_escape(stem(path_name(ck)))
+}
+
+fn api_row(method, path, what) {
+    return "<tr><td><b class=\"m m-" + str_lower(method) + "\">" + method + "</b></td><td><code>" + path + "</code></td><td>" + what + "</td></tr>"
+}
+
+fn api_doc() {
+    return "<p>LingDiffusion speaks the AUTOMATIC1111 WebUI API, so clients written for the WebUI work against it unchanged. " +
+        "Everything is JSON. Images come back as base64 PNGs, each carrying its generation parameters in the PNG's <code>parameters</code> text.</p>" +
+        "<h3>WebUI-compatible</h3><table class=\"api\">" +
+        api_row("POST", "/sdapi/v1/txt2img", "Generate. Waits and answers <code>{images, parameters, info}</code>.") +
+        api_row("POST", "/sdapi/v1/img2img", "Same, from <code>init_images</code> with <code>denoising_strength</code>.") +
+        api_row("GET", "/sdapi/v1/progress", "Progress of the running job, with a live preview in <code>current_image</code>.") +
+        api_row("POST", "/sdapi/v1/interrupt", "Stop the running job (images so far are kept).") +
+        api_row("POST", "/sdapi/v1/skip", "End the current batch, go on with the next.") +
+        api_row("GET", "/sdapi/v1/sd-models", "Checkpoints (SD 1.5 and SDXL).") +
+        api_row("GET", "/sdapi/v1/loras", "LoRAs, for <code>&lt;lora:name:weight&gt;</code>.") +
+        api_row("GET", "/sdapi/v1/sd-vae", "Stand-alone VAEs.") +
+        api_row("GET", "/sdapi/v1/upscalers", "Lanczos, Nearest and every ESRGAN / Real-ESRGAN model found.") +
+        api_row("POST", "/sdapi/v1/extra-single-image", "<code>{image, upscaler_1, upscaling_resize}</code> → <code>{image}</code>: upscale one picture.") +
+        api_row("GET", "/sdapi/v1/samplers", "Sampling methods.") +
+        api_row("GET", "/sdapi/v1/schedulers", "Schedule types.") +
+        api_row("GET / POST", "/sdapi/v1/options", "<code>sd_model_checkpoint</code>, <code>sd_vae</code>: switch models.") +
+        api_row("POST", "/sdapi/v1/png-info", "<code>{image}</code> → the parameters stored in a PNG.") +
+        api_row("POST", "/sdapi/v1/unload-checkpoint", "Free the GPU.") +
+        "</table>" +
+        "<h3>Queued (what this page uses)</h3><table class=\"api\">" +
+        api_row("POST", "/api/generate?mode=txt2img", "Same body as txt2img; answers <code>{job}</code> at once.") +
+        api_row("GET", "/api/status?job=ID", "<code>state</code> (queued, loading, running, decoding, done, interrupted, error), <code>step</code>, <code>steps</code>, <code>progress</code>, <code>eta</code>, <code>images</code>, <code>seeds</code>, <code>infotexts</code>.") +
+        api_row("GET", "/api/preview?job=ID", "Live preview as base64 PNG.") +
+        api_row("POST", "/api/interrupt?job=ID", "Interrupt (or <code>/api/skip</code>).") +
+        api_row("GET", "/api/models", "Checkpoints, LoRAs, VAEs, samplers and the engine state in one call.") +
+        api_row("GET", "/api/gallery?mode=txt2img&amp;page=0", "Saved images, newest first (mode txt2img, img2img or edit).") +
+        "</table>" +
+        "<h3>Instruction editing (Qwen-Image-Edit-2511)</h3><table class=\"api\">" +
+        api_row("POST", "/api/generate?mode=edit", "<code>{prompt, init_images: [image], edit_mode, megapixels, seed, n_iter}</code>; answers <code>{job}</code>, poll <code>/api/status</code>.") +
+        "</table><p><code>edit_mode</code>: <code>lightning8</code> (default, 8 steps), <code>lightning4</code> (fastest), <code>full</code> (40 steps with true CFG; also <code>negative_prompt</code>, <code>cfg_scale</code>, <code>steps</code>). " +
+        "The prompt is an instruction: \"add a red bow in her hair\", \"make the hair more detailed\", \"change her eyes to golden\". " +
+        "The 20B transformer runs quantized (GGUF Q4_K_M) on the edit GPU, the Qwen2.5-VL-7B encoder (Q8) on the encoder GPU; both stay loaded between edits.</p>" +
+        "<h3>Request fields</h3><p><code>prompt</code>, <code>negative_prompt</code>, <code>steps</code>, <code>sampler_name</code> (Euler a, Euler, Heun, DPM++ 2M, DPM++ 2M SDE, DDIM; \"DPM++ 2M Karras\" also works), " +
+        "<code>scheduler</code> (Automatic, Uniform, Karras, Exponential), <code>cfg_scale</code>, <code>width</code>, <code>height</code>, <code>seed</code> (-1 = random), <code>batch_size</code>, <code>n_iter</code>, " +
+        "<code>clip_skip</code>, <code>enable_hr</code>, <code>hr_scale</code>, <code>hr_upscaler</code> (Latent (nearest), Lanczos, or an ESRGAN model name such as RealESRGAN_x4plus_anime_6B), <code>hr_second_pass_steps</code>, <code>denoising_strength</code>, " +
+        "<code>init_images</code>, <code>resize_mode</code>, <code>override_settings.sd_model_checkpoint</code>, <code>save_images</code>, <code>send_images</code>.</p>" +
+        "<h3>Example</h3><pre class=\"code\">curl -s http://127.0.0.1:" + cli_arg("port", "7860") + "/sdapi/v1/txt2img -H \"Content-Type: application/json\" \\\n" +
+        "  -d '{\"prompt\": \"a lighthouse at dusk, (oil painting:1.2)\", \"steps\": 24, \"sampler_name\": \"DPM++ 2M\", \"scheduler\": \"Karras\", \"seed\": 42}'</pre>"
+}
+
+fn boot_json() {
+    return "{\"outputs_root\":" + jstr(conf("outputs_root")) +
+        ",\"checkpoint\":" + jstr(conf("checkpoint")) +
+        ",\"models\":" + models_json() +
+        ",\"engine\":" + sd_loaded() +
+        ",\"settings\":" + sd_config("{}") + "}"
+}
+
+fn page_home(request) {
+    bind page = read_file("templates/index.html")
+    bind ck = conf("checkpoint")
+    bind model = "no checkpoint"
+    bind suffix = ""
+    if ck != "" {
+        bind model = stem(path_name(ck))
+        bind suffix = " - " + model
+    }
+    bind page = str_replace(page, "{{TITLE_SUFFIX}}", html_escape(suffix))
+    bind page = str_replace(page, "{{TITLE_MODEL}}", html_escape(model))
+    bind page = str_replace(page, "{{CKPT_OPTIONS}}", ckpt_options())
+    bind page = str_replace(page, "{{VAE_OPTIONS}}", vae_options())
+    bind page = str_replace(page, "{{SAMPLER_OPTIONS}}", json_list_options(sd_samplers(), "name", "name", "Euler a"))
+    bind page = str_replace(page, "{{SCHEDULE_OPTIONS}}", json_list_options(sd_schedulers(), "label", "label", "Automatic"))
+    bind page = str_replace(page, "{{MODEL_TREE}}", model_tree())
+    bind page = str_replace(page, "{{LORA_LIST}}", lora_list())
+    bind page = str_replace(page, "{{ENGINE_LINE}}", engine_line())
+    bind page = str_replace(page, "{{STATUS}}", "Ready")
+    bind page = str_replace(page, "{{API_DOC}}", api_doc())
+    bind page = str_replace(page, "{{BOOT_JSON}}", boot_json())
+    return respond(200, page, "text/html; charset=utf-8")
+}

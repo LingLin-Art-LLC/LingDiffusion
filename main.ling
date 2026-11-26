@@ -1,0 +1,3 @@
+// main.ling — entry point. The real program lives in app.ling (same convention as
+// studio.linglin.art); run.bat starts app.ling directly.
+use "app"

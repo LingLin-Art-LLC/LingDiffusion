@@ -1,0 +1,76 @@
+// controllers/video.ling — the Video tab's server side. The browser does the video work itself
+// (decoding, optical flow, warping, tweening, encoding: static/video.js), so nothing here touches
+// a video file. Each keyframe is an ordinary img2img job (POST /api/generate?mode=video, whose
+// raw result lands in <run>/keys), and the finished frames come back here to be kept on disk:
+//
+//   outputs/video-images/<date>/<run>/keys/00000-<seed>.png   what the model drew, per keyframe
+//   outputs/video-images/<date>/<run>/frames/00000.png         the final frames, in order
+//   outputs/video-images/<date>/<run>/run.json                 the settings and prompt schedule
+
+// A run name becomes part of a folder path: keep letters, digits, "-" and "_" only.
+fn safe_name(s) {
+    bind ok = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+    bind out = ""
+    bind i = 0
+    while i < str_len(s) && str_len(out) < 80 {
+        bind c = substr(s, i, 1)
+        if str_find(ok, c) >= 0 {
+            bind out = out + c
+        }
+        bind i = i + 1
+    }
+    return out
+}
+
+fn pad5(n) {
+    bind s = num_str(floor(n))
+    while str_len(s) < 5 {
+        bind s = "0" + s
+    }
+    return s
+}
+
+// outputs/video-images/<date>/<run>, or "" when the run name is missing
+fn video_run_dir(request) {
+    bind run = safe_name(query_param(request.query, "run", ""))
+    if run == "" {
+        return ""
+    }
+    bind day = query_param(request.query, "date", "")
+    if !is_date(day) {
+        bind day = today()
+    }
+    return conf("outputs_root") + "/video-images/" + day + "/" + run
+}
+
+// POST /api/video/frame?run=NAME&date=YYYY-MM-DD&i=N   body: a data: URL (or base64) PNG
+fn api_video_frame(request) {
+    bind dir = video_run_dir(request)
+    if dir == "" {
+        return respond_error(400, "missing run name")
+    }
+    bind i = to_number(query_param(request.query, "i", "-1"))
+    if i < 0 || i > 999999 {
+        return respond_error(400, "bad frame index")
+    }
+    make_dir(dir + "/frames")
+    bind path = dir + "/frames/" + pad5(i) + ".png"
+    if !base64_decode_to_file(request.body, path) {
+        return respond_error(400, "could not save frame " + num_str(i))
+    }
+    return respond_json("{\"ok\":true,\"path\":" + jstr(path) + "}")
+}
+
+// POST /api/video/meta?run=NAME&date=YYYY-MM-DD   body: the run's settings as JSON
+fn api_video_meta(request) {
+    bind dir = video_run_dir(request)
+    if dir == "" {
+        return respond_error(400, "missing run name")
+    }
+    if !str_starts_with(str_trim(request.body), "{") {
+        return respond_error(400, "run.json must be a JSON object")
+    }
+    make_dir(dir)
+    write_file(dir + "/run.json", request.body)
+    return respond_json("{\"ok\":true,\"dir\":" + jstr(dir) + "}")
+}
